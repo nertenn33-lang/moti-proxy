@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -8,4 +11,6 @@
   "devDependencies": {
     "babel-plugin-module-resolver": "^5.0.2"
   }
+}
+
 }
