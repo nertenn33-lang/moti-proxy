@@ -1,92 +1,90 @@
-require("dotenv").config();
-
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
 
 const app = express();
-
-/* =======================
-   MIDDLEWARE
-======================= */
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-/* =======================
-   ENV (RAILWAY UYUMLU)
-======================= */
-const PORT = process.env.PORT; // ❗ SABİT PORT YOK
-const PROVIDER = (process.env.PROVIDER || "ollama").toLowerCase();
-const MODEL = process.env.MODEL || "llama3.1:8b";
-const OLLAMA_ENDPOINT =
-  process.env.OLLAMA_ENDPOINT || "http://127.0.0.1:11434";
+const PORT = process.env.PORT || 8080;
+const PROVIDER = (process.env.PROVIDER || 'openrouter').toLowerCase();
+const MODEL = process.env.MODEL || 'openai/gpt-4o-mini';
 
-/* =======================
-   HEALTH CHECK (ŞART)
-======================= */
-app.get("/health", (req, res) => {
-  res.status(200).json({
+app.get('/health', (req, res) => {
+  res.json({
     ok: true,
-    service: "moti-proxy",
+    service: 'moti-proxy',
     provider: PROVIDER,
     model: MODEL,
   });
 });
 
-/* =======================
-   ROOT
-======================= */
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "MOTI Proxy is running",
-  });
-});
-
-/* =======================
-   CHAT ENDPOINT
-======================= */
-app.post("/chat", async (req, res) => {
+app.post('/chat', async (req, res) => {
   try {
-    const { message = "" } = req.body;
+    const { message } = req.body;
 
-    if (!message) {
-      return res.status(400).json({ ok: false, error: "empty_message" });
+    if (!message || !message.trim()) {
+      return res.status(400).json({
+        ok: false,
+        error: 'empty_message',
+      });
     }
 
-    if (PROVIDER !== "ollama") {
-      return res
-        .status(400)
-        .json({ ok: false, error: "unsupported_provider" });
+    // ✅ OPENROUTER
+    if (PROVIDER === 'openrouter') {
+      const response = await axios.post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          model: MODEL,
+          messages: [
+            {
+              role: 'system',
+              content:
+                "Sen Moti'sin. Türkçe konuş. Kısa, sıcak ve uygulanabilir cevaplar ver.",
+            },
+            {
+              role: 'user',
+              content: message,
+            },
+          ],
+          temperature: 0.4,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://moti.app',
+            'X-Title': 'MOTI Proxy',
+          },
+          timeout: 20000,
+        }
+      );
+
+      const reply =
+        response.data?.choices?.[0]?.message?.content?.trim();
+
+      return res.json({
+        ok: true,
+        reply,
+      });
     }
 
-    const prompt = `Sen Moti'sin. Türkçe konuş.\n\nKullanıcı: ${message}\nMoti:`;
-
-    const response = await axios.post(`${OLLAMA_ENDPOINT}/api/generate`, {
-      model: MODEL,
-      prompt,
-      stream: false,
-      options: { temperature: 0.2 },
-    });
-
-    const reply = response.data?.response?.trim() || "";
-
-    res.json({
-      ok: true,
-      reply,
+    // ❌ başka provider yok
+    return res.status(400).json({
+      ok: false,
+      error: 'unsupported_provider',
+      provider: PROVIDER,
     });
   } catch (err) {
     console.error(err?.response?.data || err.message);
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
-      error: "proxy_error",
+      error: 'proxy_error',
     });
   }
 });
 
-/* =======================
-   START SERVER
-======================= */
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("🚀 MOTI proxy running on port", PORT);
+app.listen(PORT, () => {
+  console.log(`🚀 MOTI proxy running on port ${PORT}`);
 });
