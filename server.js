@@ -3,6 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const planService = require('./planService');
+const weeklyReportService = require('./weeklyReportService');
+const revenuecatService = require('./services/revenuecatService');
+const requireUserId = require('./middleware/requireUserId');
 
 const app = express();
 
@@ -22,6 +25,7 @@ console.log(`🔌 Port: ${PORT}`);
 console.log(`🤖 Provider: ${PROVIDER}`);
 console.log(`🧠 Model: ${MODEL}`);
 console.log(`🔑 OpenRouter API Key: ${process.env.OPENROUTER_API_KEY ? '✅ Set' : '❌ Missing'}`);
+console.log(`💎 RevenueCat API Key: ${process.env.REVENUECAT_SECRET_KEY ? '✅ Set' : '❌ Missing'}`);
 
 // ✅ Health endpoint
 app.get('/health', (req, res) => {
@@ -229,17 +233,9 @@ console.log('✅ Registered: POST /moti/chat');
 // ============================================================================
 
 // ✅ GET /plans - Get all active plans for user (home screen)
-app.get('/plans', (req, res) => {
-  const userId = req.headers['x-user-id'] || req.query.userId;
+app.get('/plans', requireUserId, (req, res) => {
+  const userId = req.userId;
   console.log(`[${new Date().toISOString()}] GET /plans for user ${userId}`);
-  
-  if (!userId) {
-    return res.status(400).json({
-      ok: false,
-      error: 'user_id_required',
-      message: 'userId required in X-User-Id header or query parameter',
-    });
-  }
   
   try {
     const plans = planService.getUserPlans(userId);
@@ -285,22 +281,17 @@ app.get('/plans', (req, res) => {
 console.log('✅ Registered: GET /plans');
 
 // ✅ POST /plans - Create new plan with subscription check
-app.post('/plans', (req, res) => {
-  const userId = req.headers['x-user-id'] || req.body.userId;
-  const userTier = req.headers['x-user-tier'] || req.body.userTier || 'free';
+app.post('/plans', requireUserId, async (req, res) => {
+  const userId = req.userId;
   const { name, type, tasks, metadata } = req.body;
   
-  console.log(`[${new Date().toISOString()}] POST /plans for user ${userId} (${userTier})`);
-  
-  if (!userId) {
-    return res.status(400).json({
-      ok: false,
-      error: 'user_id_required',
-      message: 'userId required in X-User-Id header or body',
-    });
-  }
+  console.log(`[${new Date().toISOString()}] POST /plans for user ${userId}`);
   
   try {
+    // ✅ Check premium status server-side
+    const isPremium = await revenuecatService.isUserPremium(userId);
+    const userTier = isPremium ? 'premium' : 'free';
+    
     // ✅ Check subscription limits
     const canCreate = planService.canCreatePlan(userId, userTier);
     
@@ -684,6 +675,134 @@ app.get('/plans/:id/notifications', (req, res) => {
 });
 console.log('✅ Registered: GET /plans/:id/notifications');
 
+// ✅ GET /weekly-report - Generate weekly AI report
+app.get('/weekly-report', requireUserId, async (req, res) => {
+  const userId = req.userId;
+  
+  console.log(`[${new Date().toISOString()}] GET /weekly-report for user ${userId}`);
+  
+  try {
+    // Check premium status server-side
+    const isPremium = await revenuecatService.isUserPremium(userId);
+    
+    const startTime = Date.now();
+    const metrics = weeklyReportService.generateWeeklyReport(userId);
+    const generationTime = Date.now() - startTime;
+    
+    console.log(`📊 Weekly report metrics computed for user ${userId} (${generationTime}ms)`);
+    console.log(`   Week range: ${metrics.weekRange.start} to ${metrics.weekRange.end}`);
+    console.log(`   Active days: ${metrics.global.activeDays}/7`);
+    
+    // If not premium, return summary only
+    if (!isPremium) {
+      return res.json({
+        activeDays: metrics.global.activeDays,
+        perfectDays: metrics.global.perfectDays,
+        missedDays: metrics.global.missedDays,
+        teaser: true,
+      });
+    }
+    
+    // Premium users get full analysis with AI report
+    let aiReport = null;
+    
+    try {
+      if (!process.env.OPENROUTER_API_KEY) {
+        console.warn('⚠️ OPENROUTER_API_KEY not set, skipping AI report generation');
+      } else {
+        console.log(`🤖 Generating AI report for premium user ${userId}...`);
+        const aiStartTime = Date.now();
+        
+        // Prepare context for AI (statistics only, no raw task lists)
+        const aiContext = {
+          weekRange: metrics.weekRange,
+          global: metrics.global,
+          plans: metrics.plans.map(p => ({
+            planName: p.planName,
+            planType: p.planType,
+            completionRate: p.completionRate,
+            daysActive: p.daysActive,
+            daysMissed: p.daysMissed,
+            streak: p.streak,
+            bestDayOfWeek: p.bestDayOfWeek,
+            worstDayOfWeek: p.worstDayOfWeek,
+          })),
+          patterns: metrics.patterns,
+        };
+        
+        const MODEL = process.env.MODEL || 'openai/gpt-4o-mini';
+        
+        const response = await axios.post(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            model: MODEL,
+            messages: [
+              {
+                role: 'system',
+                content: 'You are NATI, a supportive productivity and life coach. Analyze the user\'s last 7 days. Be honest, kind, and actionable. Do not shame. Provide encouragement, insight, and 3 concrete improvements for next week.',
+              },
+              {
+                role: 'user',
+                content: JSON.stringify(aiContext, null, 2),
+              },
+            ],
+            temperature: 0.4,
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': 'https://moti.app',
+              'X-Title': 'MOTI Proxy',
+            },
+            timeout: 20000,
+          }
+        );
+        
+        const aiDuration = Date.now() - aiStartTime;
+        aiReport = response.data?.choices?.[0]?.message?.content?.trim();
+        
+        if (aiReport) {
+          console.log(`✅ AI report generated for user ${userId} (${aiDuration}ms, ${aiReport.length} chars)`);
+        } else {
+          console.warn('⚠️ Empty AI response, continuing without AI report');
+        }
+      }
+    } catch (aiError) {
+      // Don't fail the request if AI fails
+      console.error(`❌ AI report generation failed for user ${userId}:`, aiError.message);
+      // Continue without AI report
+    }
+    
+    // Prepare plans summary
+    const plansSummary = metrics.plans.map(p => ({
+      planId: p.planId,
+      planName: p.planName,
+      completionRate: p.completionRate,
+      daysActive: p.daysActive,
+      streak: p.streak,
+    }));
+    
+    return res.json({
+      metrics: {
+        global: metrics.global,
+        weekRange: metrics.weekRange,
+      },
+      aiReport,
+      plansSummary,
+      patterns: metrics.patterns,
+    });
+  } catch (err) {
+    console.error(`❌ Error generating weekly report:`, err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      details: err.message,
+    });
+  }
+});
+console.log('✅ Registered: GET /weekly-report');
+
 /**
  * Get notification schedule based on plan type
  * Each plan type has different notification times and messages
@@ -760,6 +879,9 @@ app.listen(PORT, HOST, () => {
   console.log(`   GET    /plans/:id/context - Get plan context`);
   console.log(`   GET    /plans/:id/notifications - Get notification schedule`);
   console.log(`   POST   /plans/:id/rollover - Check day rollover`);
+  console.log('');
+  console.log('📊 Weekly Report Endpoints:');
+  console.log(`   GET    /weekly-report - Get weekly AI report`);
   console.log('');
   console.log('✅ Server ready!');
 });
