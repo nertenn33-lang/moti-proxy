@@ -18,6 +18,39 @@ const HOST = '0.0.0.0'; // ✅ MUST bind to 0.0.0.0 for Railway
 const PROVIDER = (process.env.PROVIDER || 'openrouter').toLowerCase();
 const MODEL = process.env.MODEL || 'openai/gpt-4o-mini';
 
+const PLAN_JSON_SCHEMA = `
+You are generating a PLAN for a productivity app.
+
+You must output ONLY valid JSON.  
+No explanation. No markdown. No text. No emojis.
+
+Schema:
+{
+  "title": string,
+  "type": "fitness" | "study" | "focus" | "custom",
+  "durationDays": number,
+  "days": [
+    {
+      "day": number,
+      "tasks": [
+        {
+          "id": string,
+          "title": string,
+          "description": string,
+          "estimatedMinutes": number
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- days.length MUST equal durationDays
+- Every day must have 3–7 tasks
+- estimatedMinutes must be between 5 and 90
+- If you cannot produce valid JSON, output EXACTLY: INVALID
+`;
+
 // ✅ Log on server startup
 console.log('🚀 MOTI Proxy Server Starting...');
 console.log(`📦 Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -109,31 +142,50 @@ app.post('/moti/chat/live', async (req, res) => {
 });
 console.log('✅ Registered: POST /moti/chat/live');
 
-// ✅ Main chat endpoint - forward to OpenRouter with plan context
+// ✅ Main chat endpoint - forward to OpenRouter (free chat or plan chat)
 app.post('/moti/chat', async (req, res) => {
   console.log(`[${new Date().toISOString()}] POST /moti/chat`);
-  console.log(`📥 Request body:`, JSON.stringify({ message: req.body?.message ? '***' : 'missing' }));
   
   try {
-    const { message, userId, planId } = req.body;
+    const { mode, planId, message, userId } = req.body;
     
-    // ✅ Get plan context if planId provided
-    let planContext = null;
-    if (userId && planId) {
-      planContext = planService.getPlanContext(userId, planId);
-      if (planContext) {
-        console.log(`📋 Plan context loaded: ${planContext.planName} (Day ${planContext.currentDay})`);
-      }
-    }
-
+    // Backward compatibility: if mode not provided, default to "plan"
+    const chatMode = mode || 'plan';
+    
+    // Validate message
     if (!message || !message.trim()) {
-      console.log('❌ Empty message received');
       return res.status(400).json({
         ok: false,
         error: 'empty_message',
       });
     }
-
+    
+    // Validation: if mode === "plan", planId is REQUIRED
+    if (chatMode === 'plan') {
+      if (!planId) {
+        return res.status(400).json({
+          ok: false,
+          error: 'plan_id_required',
+          message: 'planId is required when mode is "plan"',
+        });
+      }
+    }
+    
+    // Load plan context only for "plan" mode
+    let planContext = null;
+    if (chatMode === 'plan' && userId && planId) {
+      planContext = planService.getPlanContext(userId, planId);
+      if (!planContext) {
+        return res.status(404).json({
+          ok: false,
+          error: 'plan_not_found',
+        });
+      }
+    }
+    
+    // Log request
+    console.log(`[AI] mode=${chatMode} userId=${userId || 'null'} planId=${planId || 'null'}`);
+    
     if (!process.env.OPENROUTER_API_KEY) {
       console.error('❌ OPENROUTER_API_KEY not set');
       return res.status(500).json({
@@ -144,35 +196,27 @@ app.post('/moti/chat', async (req, res) => {
 
     // ✅ OPENROUTER
     if (PROVIDER === 'openrouter') {
-      console.log(`📡 Sending to OpenRouter (${MODEL})...`);
       const startTime = Date.now();
       
-      // ✅ Build system message with plan context if available
-      let systemMessage = "Sen Moti'sin. Türkçe konuş. Kısa, sıcak ve uygulanabilir cevaplar ver.";
-      
-      if (planContext) {
-        const tasksStatus = planContext.completionStatus.completed === planContext.completionStatus.total 
-          ? 'Tamamlandı!' 
-          : `${planContext.completionStatus.completed}/${planContext.completionStatus.total} tamamlandı`;
-        
-        systemMessage += `\n\nKullanıcı "${planContext.planName}" planıyla ilgili konuşuyor. Bu plan: Gün ${planContext.currentDay}. Bugünün görevleri: ${tasksStatus}.`;
-        systemMessage += `\nSadece bu plan hakkında konuş. Başka planlardan bahsetme.`;
+      // Build messages based on mode
+      let messages;
+      if (chatMode === 'free') {
+        messages = [
+          { role: 'system', content: 'You are NATI, a friendly and helpful AI assistant.' },
+          { role: 'user', content: message }
+        ];
+      } else {
+        messages = [
+          { role: 'system', content: PLAN_JSON_SCHEMA },
+          { role: 'user', content: message }
+        ];
       }
       
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
         {
           model: MODEL,
-          messages: [
-            {
-              role: 'system',
-              content: systemMessage,
-            },
-            {
-              role: 'user',
-              content: message,
-            },
-          ],
+          messages,
           temperature: 0.4,
         },
         {
@@ -190,9 +234,9 @@ app.post('/moti/chat', async (req, res) => {
       const status = response.status;
       console.log(`✅ OpenRouter response: ${status} (${duration}ms)`);
       
-      const reply = response.data?.choices?.[0]?.message?.content?.trim();
+      const aiText = response.data?.choices?.[0]?.message?.content;
       
-      if (!reply) {
+      if (!aiText) {
         console.error('❌ No reply in OpenRouter response:', JSON.stringify(response.data));
         return res.status(500).json({
           ok: false,
@@ -200,10 +244,39 @@ app.post('/moti/chat', async (req, res) => {
         });
       }
 
-      console.log(`📤 Sending reply (${reply.length} chars)`);
-      // ✅ Response format: { reply: string }
+      console.log('[AI_RAW]', aiText);
+
+      // Harden JSON parsing for plan mode
+      if (chatMode === 'plan') {
+        const trimmedText = aiText.trim();
+        
+        if (trimmedText === 'INVALID') {
+          return res.status(422).json({
+            ok: false,
+            error: 'AI_INVALID_PLAN',
+          });
+        }
+
+        let plan;
+        try {
+          plan = JSON.parse(trimmedText);
+        } catch (e) {
+          console.error('PLAN_JSON_PARSE_FAILED', trimmedText);
+          return res.status(422).json({
+            ok: false,
+            error: 'PLAN_JSON_PARSE_FAILED',
+          });
+        }
+
+        // Return the parsed JSON as reply (stringified to maintain { reply: string } format)
+        return res.json({
+          reply: JSON.stringify(plan),
+        });
+      }
+
+      // Free mode: return text as-is
       return res.json({
-        reply,
+        reply: aiText.trim(),
       });
     }
 
