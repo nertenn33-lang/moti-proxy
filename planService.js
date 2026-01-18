@@ -273,6 +273,44 @@ function deletePlan(userId, planId) {
   return true;
 }
 
+/**
+ * Fill plan with days data (used after AI generation)
+ * @param {string} userId - User ID
+ * @param {string} planId - Plan ID
+ * @param {Object} daysData - Object with days array
+ * @returns {Object|null} Updated plan or null if not found
+ */
+function fillPlan(userId, planId, daysData) {
+  const userPlans = plansStore.get(userId) || [];
+  const planIndex = userPlans.findIndex(p => p.id === planId);
+  
+  if (planIndex === -1) {
+    return null; // Plan not found
+  }
+  
+  const plan = userPlans[planIndex];
+  const todayDate = getTodayDate();
+  
+  // Replace plan.days with provided days
+  plan.days = daysData.days || [];
+  
+  // Set currentDay = 1
+  plan.currentDay = 1;
+  
+  // Set lastProcessedDate = today
+  plan.lastProcessedDate = todayDate;
+  
+  // Update updatedAt timestamp
+  plan.updatedAt = new Date().toISOString();
+  
+  // Save back to store
+  userPlans[planIndex] = plan;
+  plansStore.set(userId, userPlans);
+  
+  console.log(`✅ Filled plan ${planId} with ${plan.days.length} day(s)`);
+  return plan;
+}
+
 module.exports = {
   getUserPlans,
   getPlanById,
@@ -284,6 +322,7 @@ module.exports = {
   getCompletionStatus,
   getPlanContext,
   deletePlan,
+  fillPlan,
   processDayRollover,
   shouldAdvanceDay,
   getTodayDate,

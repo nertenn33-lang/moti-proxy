@@ -576,6 +576,70 @@ app.put('/plans/:id', (req, res) => {
 });
 console.log('✅ Registered: PUT /plans/:id');
 
+// ✅ POST /plans/:id/fill - Fill plan with days data (after AI generation)
+app.post('/plans/:id/fill', requireUserId, (req, res) => {
+  const userId = req.userId;
+  const planId = req.params.id;
+  const { days } = req.body;
+  
+  console.log(`[${new Date().toISOString()}] POST /plans/${planId}/fill for user ${userId}`);
+  
+  try {
+    // Validate plan exists
+    const existingPlan = planService.getPlanById(userId, planId);
+    if (!existingPlan) {
+      return res.status(404).json({
+        ok: false,
+        error: 'plan_not_found',
+      });
+    }
+    
+    // Validate days array
+    if (!days || !Array.isArray(days)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'invalid_days',
+        message: 'days must be an array',
+      });
+    }
+    
+    // Fill the plan
+    const plan = planService.fillPlan(userId, planId, { days });
+    
+    if (!plan) {
+      return res.status(404).json({
+        ok: false,
+        error: 'plan_not_found',
+      });
+    }
+    
+    const completion = planService.getCompletionStatus(plan);
+    
+    return res.json({
+      ok: true,
+      plan: {
+        id: plan.id,
+        name: plan.name,
+        type: plan.type,
+        currentDay: plan.currentDay,
+        lastProcessedDate: plan.lastProcessedDate,
+        days: plan.days || [],
+        tasks: plan.tasks || [],
+        completionStatus: completion,
+        metadata: plan.metadata || {},
+      },
+    });
+  } catch (err) {
+    console.error(`❌ Error filling plan:`, err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      details: err.message,
+    });
+  }
+});
+console.log('✅ Registered: POST /plans/:id/fill');
+
 // ✅ DELETE /plans/:id - Delete plan
 app.delete('/plans/:id', (req, res) => {
   const userId = req.headers['x-user-id'] || req.query.userId;
@@ -949,6 +1013,7 @@ app.listen(PORT, HOST, () => {
   console.log(`   PUT    /plans/:id - Update plan`);
   console.log(`   DELETE /plans/:id - Delete plan`);
   console.log(`   PUT    /plans/:id/tasks/:taskId/complete - Complete task`);
+  console.log(`   POST   /plans/:id/fill - Fill plan with days data`);
   console.log(`   GET    /plans/:id/context - Get plan context`);
   console.log(`   GET    /plans/:id/notifications - Get notification schedule`);
   console.log(`   POST   /plans/:id/rollover - Check day rollover`);
